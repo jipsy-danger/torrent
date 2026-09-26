@@ -362,7 +362,7 @@ const DB_NAME = 'torrent-downloader';
           strategy: 'sequential',
           destroyStoreOnDestroy: false
         };
-        // Saved torrents start paused until their existing OPFS pieces are re-scanned.
+        // Saved torrents start paused until their existing pieces are verified.
         // This prevents a power-loss/reload recovery from racing a fresh download.
         if (existing) {
           opts.paused = true;
@@ -575,13 +575,13 @@ const DB_NAME = 'torrent-downloader';
           return;
         }
 
-        if (typeof window.WebTorrent !== 'function') {
+        if (typeof WebTorrent !== 'function') {
           $('storageText').textContent = 'WebTorrent failed to load';
-          showNotice('The WebTorrent browser bundle could not be loaded. Check the network connection and reload.');
+          showNotice('The bundled WebTorrent client is unavailable. Reload after the latest deployment.');
           return;
         }
 
-        client = new window.WebTorrent();
+        client = new WebTorrent();
         client.on('error', (error) => showNotice(error?.message || String(error)));
 
         const saved = db ? await dbAll() : [];
