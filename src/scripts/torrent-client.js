@@ -506,14 +506,37 @@ const DB_NAME = 'torrent-downloader';
         return key;
       }
 
-      function addTorrent(input, existing = null) {
+      async function addTorrent(input, existing = null) {
         clearNotice();
         if (!client) throw new Error('Torrent client is not ready.');
+
+        // WebTorrent identifies torrent files and magnets by info hash. Check
+        // the active client before creating another Torrent instance so selecting
+        // the same .torrent again never creates a temporary duplicate that then
+        // destroys/overwrites the visible entry.
+        if (!existing) {
+          try {
+            const active = await client.get(input);
+            if (active) {
+              const known = [...live.values()].find((item) => item.torrent === active);
+              if (!known) {
+                attachTorrent(active);
+              }
+              showNotice('Torrent already added — continuing the existing download.');
+              render();
+              return active;
+            }
+          } catch {
+            // Let client.add() produce the normal validation error for malformed input.
+          }
+        }
+
         const opts = {
           store: makeStore,
           strategy: 'sequential',
           destroyStoreOnDestroy: false
         };
+
         // Saved torrents start paused until their existing pieces are verified.
         // This prevents a power-loss/reload recovery from racing a fresh download.
         if (existing) {
@@ -526,7 +549,7 @@ const DB_NAME = 'torrent-downloader';
           torrent = client.add(input, opts);
         } catch (error) {
           showNotice(error.message || String(error));
-          return;
+          return null;
         }
 
         const key = attachTorrent(torrent, existing);
@@ -535,6 +558,7 @@ const DB_NAME = 'torrent-downloader';
           if (existing?.key && existing.key !== key) render();
         });
         render();
+        return torrent;
       }
 
       async function addMagnet() {
@@ -558,7 +582,7 @@ const DB_NAME = 'torrent-downloader';
         clearNotice();
         try {
           const bytes = new Uint8Array(await file.arrayBuffer());
-          addTorrent(bytes);
+          await addTorrent(bytes);
         } catch (error) {
           showNotice(error.message || String(error));
         }
@@ -749,8 +773,8 @@ const DB_NAME = 'torrent-downloader';
         for (const record of saved) {
           if (!record.magnet) continue;
           try {
-            addTorrent(record.magnet, record);
-          } catch {}
+            await addTorrent(record.magnet, record);
+          } catch { }
         }
         render();
       }
