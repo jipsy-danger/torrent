@@ -238,10 +238,11 @@ const title = 'torrent';
         return navigator.storage.persist().catch(() => false);
       }
 
-      function makeStore(chunkLength) {
+      function makeStore(chunkLength, storeOpts = {}) {
         if (!opfsRoot) throw new Error('OPFS is unavailable in this browser.');
         return fsAccessChunkStore(chunkLength, {
-          rootDir: opfsRoot
+          rootDir: opfsRoot,
+          name: storeOpts.name || 'default'
         });
       }
 
@@ -388,9 +389,15 @@ const title = 'torrent';
           try {
             await saveTorrent(torrent);
             if (existing?.progress > 0 && torrent.rescanFiles) {
-              torrent.rescanFiles(() => render());
+              await new Promise((resolve) => torrent.rescanFiles(() => resolve()));
             }
-          } catch {}
+            if (existing && existing.status !== 'Paused' && !torrent.done) {
+              torrent.resume();
+            }
+            await saveTorrent(torrent);
+          } catch (error) {
+            showNotice(error?.message || String(error));
+          }
           render();
         });
         torrent.on('pause', render);
@@ -407,7 +414,9 @@ const title = 'torrent';
           strategy: 'sequential',
           destroyStoreOnDestroy: false
         };
-        if (existing?.status === 'Paused') opts.paused = true;
+        // Saved torrents start paused until their existing OPFS pieces are re-scanned.
+        // This prevents a power-loss/reload recovery from racing a fresh download.
+        if (existing) opts.paused = true;
 
         let torrent;
         try {
