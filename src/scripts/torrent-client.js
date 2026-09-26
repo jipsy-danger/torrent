@@ -608,6 +608,26 @@ const DB_NAME = 'torrent-downloader';
           return null;
         }
 
+        // For a brand-new torrent (or a legacy saved record that is genuinely
+        // at 0 B), there is no local data to verify. WebTorrent normally hashes
+        // every piece before becoming ready when no startup bitfield is supplied.
+        // Install a small hook before metadata arrives so it can use an exact
+        // zero bitfield once the piece count is known. This avoids a huge empty
+        // storage scan while preserving normal verification for real partial data.
+        const emptyStoreExpected = !existing ||
+          (existing.progress === 0 && existing.downloaded === 0 && !existing.bitfield?.length);
+
+        if (emptyStoreExpected && !initialBitfield && typeof torrent._onMetadata === 'function') {
+          const originalOnMetadata = torrent._onMetadata.bind(torrent);
+          torrent._onMetadata = function (parsedTorrent) {
+            const pieceCount = parsedTorrent?.pieces?.length || 0;
+            if (pieceCount && !this._startupBitfield) {
+              this._startupBitfield = new Uint8Array(Math.ceil(pieceCount / 8));
+            }
+            return originalOnMetadata(parsedTorrent);
+          };
+        }
+
         const key = attachTorrent(torrent, existing, recordExtra);
         saveTorrent(torrent).catch(() => {});
         torrent.on('infoHash', () => {
