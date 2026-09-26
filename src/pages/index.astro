@@ -317,7 +317,7 @@ const title = 'torrent';
               let view = new Uint8Array(record.data);
               const length = opts.length == null ? view.byteLength - offset : Number(opts.length);
               view = view.slice(offset, offset + length);
-              cb(null, Buffer.from(view));
+              cb(null, globalThis.Buffer ? globalThis.Buffer.from(view) : view);
             };
             req.onerror = () => cb(req.error || this._error('IndexedDB read failed'));
           } catch (error) {
@@ -503,6 +503,7 @@ const title = 'torrent';
           if (key !== newKey && item) {
             live.delete(key);
             live.set(newKey, item);
+            try { await dbDelete(key); } catch {}
           }
           try { await saveTorrent(torrent); } catch {}
           render();
