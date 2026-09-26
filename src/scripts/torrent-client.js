@@ -99,7 +99,7 @@ const DB_NAME = 'torrent-downloader';
           }
 
           this.name = opts.name || opts.torrent?.infoHash || 'default';
-          this.rootDirPromise = opts.rootDir || navigator.storage.getDirectory();
+          this.rootDirPromise = opts.rootDir ? Promise.resolve(opts.rootDir) : navigator.storage.getDirectory();
           this.storageDirPromise = this.rootDirPromise.then((root) =>
             root.getDirectoryHandle(this.name, { create: true })
           );
@@ -789,11 +789,22 @@ const DB_NAME = 'torrent-downloader';
       });
 
       window.addEventListener('pagehide', () => {
+        // Save torrent state before the page is hidden.
+        // Do NOT destroy the client here — destroying it synchronously would
+        // cancel the async IndexedDB writes before they complete.
         try {
           for (const item of live.values()) {
             if (item.torrent?.infoHash) saveTorrent(item.torrent).catch(() => {});
           }
-          client?.destroy();
+        } catch {}
+      });
+
+      window.addEventListener('beforeunload', () => {
+        // Attempt a synchronous final save on unload.
+        try {
+          for (const item of live.values()) {
+            if (item.torrent?.infoHash) saveTorrent(item.torrent).catch(() => {});
+          }
         } catch {}
       });
 
