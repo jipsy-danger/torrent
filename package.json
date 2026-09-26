@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "astro": "^7.3.5",
-    "fs-access-chunk-store": "github:webtorrent/fs-access-chunk-store",
     "webtorrent": "^3.0.21"
   }
 }
