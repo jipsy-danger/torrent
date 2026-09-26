@@ -7,6 +7,7 @@ const DB_NAME = 'torrent-downloader';
 
       let db;
       let client;
+      let opfsRoot = null;
       const live = new Map();
       const saveTimers = new Map();
 
@@ -14,9 +15,9 @@ const DB_NAME = 'torrent-downloader';
       // HTTP/UDP trackers found in ordinary torrent files are not usable
       // directly by a browser client. These are only added to public torrents.
       const WEBTORRENT_TRACKERS = [
-        'wss://tracker.btorrent.xyz',
-        'wss://tracker.fastcast.nz',
-        'wss://tracker.openwebtorrent.com'
+        'wss://tracker.webtorrent.dev:443',
+        'wss://tracker.openwebtorrent.com:443',
+        'wss://open.ftorrent.com:443'
       ];
 
       const $ = (id) => document.getElementById(id);
@@ -85,7 +86,7 @@ const DB_NAME = 'torrent-downloader';
         }
       }
 
-      class IDBChunkStore {
+      class IDBFallbackChunkStore {
         constructor(chunkLength, opts = {}) {
           this.chunkLength = Number(chunkLength);
           if (!this.chunkLength) throw new Error('Invalid torrent chunk length.');
@@ -201,7 +202,7 @@ const DB_NAME = 'torrent-downloader';
       }
 
       function makeStore(chunkLength, storeOpts = {}) {
-        return new IDBChunkStore(chunkLength, storeOpts);
+        return new IDBFallbackChunkStore(chunkLength, storeOpts);
       }
 
       function bitfieldToBytes(bitfield, pieceCount) {
@@ -329,10 +330,13 @@ const DB_NAME = 'torrent-downloader';
         });
         torrent.on('warning', (err) => {
           const message = err?.message || String(err);
-          if (/Unsupported tracker protocol/i.test(message)) {
-            showNotice('This torrent contains a tracker protocol that browsers cannot use directly. WebTorrent-compatible WebSocket trackers are being tried when the torrent is public.');
+
+          // Optional tracker failures are normal for public tracker pools.
+          // Do not replace the entire UI with transient tracker noise.
+          if (/tracker|announce/i.test(message)) {
             return;
           }
+
           showNotice(message);
         });
         torrent.on('error', (err) => {
@@ -342,11 +346,12 @@ const DB_NAME = 'torrent-downloader';
           showNotice(err?.message || String(err));
         });
         torrent.on('metadata', async () => {
-          // Add browser-compatible trackers before WebTorrent starts discovery.
+          // Add currently listed WebTorrent-compatible trackers before discovery.
           // Never add public trackers to a private torrent.
           if (!torrent.private) {
             const current = Array.isArray(torrent.announce) ? torrent.announce : [];
-            torrent.announce = [...new Set([...current, ...WEBTORRENT_TRACKERS])];
+            const compatible = current.filter((url) => /^wss?:\/\//i.test(url));
+            torrent.announce = [...new Set([...compatible, ...WEBTORRENT_TRACKERS])];
           }
 
           const newKey = torrent.infoHash || torrent.magnetURI;
@@ -371,6 +376,15 @@ const DB_NAME = 'torrent-downloader';
           }
           render();
         });
+        torrent.on('noPeers', (announceType) => {
+          if (announceType === 'tracker') {
+            const item = live.get(key);
+            if (item && !torrent.done && !torrent.paused) {
+              item.record.status = 'Waiting for WebRTC peers';
+              render();
+            }
+          }
+        });
         torrent.on('pause', render);
         torrent.on('resume', render);
 
@@ -381,10 +395,18 @@ const DB_NAME = 'torrent-downloader';
         clearNotice();
         if (!client) throw new Error('Torrent client is not ready.');
         const opts = {
-          store: makeStore,
           strategy: 'sequential',
           destroyStoreOnDestroy: false
         };
+
+        // WebTorrent 3 includes an FSA-backed browser store. Prefer it because
+        // it is suitable for multi-GB downloads; fall back to IndexedDB only
+        // when this browser cannot expose OPFS.
+        if (opfsRoot) {
+          opts.rootDir = opfsRoot;
+        } else {
+          opts.store = makeFallbackStore;
+        }
         // Saved torrents start paused until their existing pieces are verified.
         // This prevents a power-loss/reload recovery from racing a fresh download.
         if (existing) {
@@ -587,11 +609,18 @@ const DB_NAME = 'torrent-downloader';
       async function boot() {
         try {
           db = await openDb();
+          if (navigator.storage?.getDirectory) {
+            try {
+              opfsRoot = await navigator.storage.getDirectory();
+            } catch {
+              opfsRoot = null;
+            }
+          }
           const persisted = await persistStorage();
           $('storageDot').classList.remove('warn');
           $('storageText').textContent = persisted
-            ? 'Persistent browser storage enabled'
-            : 'Browser storage available · persistence not guaranteed';
+            ? (opfsRoot ? 'Persistent storage enabled · OPFS torrent pieces' : 'Persistent storage enabled · IndexedDB fallback')
+            : (opfsRoot ? 'Browser storage available · OPFS pieces' : 'Browser storage available · persistence not guaranteed');
         } catch (error) {
           $('storageText').textContent = 'Browser storage unavailable';
           showNotice('IndexedDB is unavailable, so resumable downloads cannot be guaranteed. ' + (error?.message || ''));
