@@ -86,6 +86,122 @@ const DB_NAME = 'torrent-downloader';
         }
       }
 
+      class OPFSChunkStore {
+        constructor(chunkLength, opts = {}) {
+          this.chunkLength = Number(chunkLength);
+          if (!this.chunkLength) throw new Error('Invalid torrent chunk length.');
+
+          this.closed = false;
+          this.length = Number(opts.length) || Infinity;
+          if (this.length !== Infinity) {
+            this.lastChunkLength = this.length % this.chunkLength || this.chunkLength;
+            this.lastChunkIndex = Math.ceil(this.length / this.chunkLength) - 1;
+          }
+
+          this.name = opts.name || opts.torrent?.infoHash || 'default';
+          this.rootDirPromise = opts.rootDir || navigator.storage.getDirectory();
+          this.storageDirPromise = this.rootDirPromise.then((root) =>
+            root.getDirectoryHandle(this.name, { create: true })
+          );
+        }
+
+        _closedError() {
+          return new Error('Storage is closed');
+        }
+
+        async _chunkHandle(index) {
+          const dir = await this.storageDirPromise;
+          return dir.getFileHandle(String(index), { create: true });
+        }
+
+        put(index, buf, cb = () => {}) {
+          if (this.closed) return queueMicrotask(() => cb(this._closedError()));
+
+          const expected = index === this.lastChunkIndex
+            ? this.lastChunkLength
+            : this.chunkLength;
+
+          if (expected && buf.length !== expected) {
+            return queueMicrotask(() => cb(new Error(
+              (index === this.lastChunkIndex ? 'Last chunk' : 'Chunk') +
+              ' length must be ' + expected
+            )));
+          }
+
+          (async () => {
+            try {
+              const handle = await this._chunkHandle(index);
+              const writable = await handle.createWritable({ keepExistingData: false });
+              await writable.write(buf);
+              await writable.close();
+              cb(null);
+            } catch (error) {
+              cb(error);
+            }
+          })();
+        }
+
+        get(index, opts, cb = () => {}) {
+          if (typeof opts === 'function') return this.get(index, null, opts);
+          if (this.closed) return queueMicrotask(() => cb(this._closedError()));
+
+          opts = opts || {};
+          const offset = Number(opts.offset || 0);
+
+          (async () => {
+            try {
+              const handle = await this._chunkHandle(index);
+              let file = await handle.getFile();
+
+              const defaultLength = index === this.lastChunkIndex
+                ? this.lastChunkLength
+                : this.chunkLength;
+              const length = opts.length == null
+                ? defaultLength - offset
+                : Number(opts.length);
+
+              file = file.slice(offset, offset + length);
+              const data = await file.arrayBuffer();
+
+              if (data.byteLength === 0) {
+                const error = new Error('Index ' + index + ' does not exist');
+                error.notFound = true;
+                cb(error);
+                return;
+              }
+
+              cb(null, new Uint8Array(data));
+            } catch (error) {
+              if (error?.name === 'NotFoundError') {
+                error.notFound = true;
+              }
+              cb(error);
+            }
+          })();
+        }
+
+        close(cb = () => {}) {
+          if (this.closed) return queueMicrotask(() => cb(this._closedError()));
+          this.closed = true;
+          queueMicrotask(() => cb(null));
+        }
+
+        destroy(cb = () => {}) {
+          if (this.closed) return queueMicrotask(() => cb(this._closedError()));
+
+          (async () => {
+            try {
+              const root = await this.rootDirPromise;
+              await root.removeEntry(this.name, { recursive: true });
+              this.closed = true;
+              cb(null);
+            } catch (error) {
+              cb(error);
+            }
+          })();
+        }
+      }
+
       class IDBFallbackChunkStore {
         constructor(chunkLength, opts = {}) {
           this.chunkLength = Number(chunkLength);
@@ -98,13 +214,11 @@ const DB_NAME = 'torrent-downloader';
             this.lastChunkIndex = Math.ceil(this.length / this.chunkLength) - 1;
           }
 
-          // WebTorrent supplies the infoHash as storeOpts.name.
           this.name = opts.name || opts.torrent?.infoHash || 'default';
         }
 
         _error(message) {
-          const error = new Error(message);
-          return error;
+          return new Error(message);
         }
 
         put(index, buf, cb = () => {}) {
@@ -155,7 +269,7 @@ const DB_NAME = 'torrent-downloader';
               let view = new Uint8Array(record.data);
               const length = opts.length == null ? view.byteLength - offset : Number(opts.length);
               view = view.slice(offset, offset + length);
-              cb(null, globalThis.Buffer ? globalThis.Buffer.from(view) : view);
+              cb(null, view);
             };
             req.onerror = () => cb(req.error || this._error('IndexedDB read failed'));
           } catch (error) {
@@ -202,6 +316,7 @@ const DB_NAME = 'torrent-downloader';
       }
 
       function makeStore(chunkLength, storeOpts = {}) {
+        if (opfsRoot) return new OPFSChunkStore(chunkLength, { ...storeOpts, rootDir: opfsRoot });
         return new IDBFallbackChunkStore(chunkLength, storeOpts);
       }
 
@@ -395,18 +510,10 @@ const DB_NAME = 'torrent-downloader';
         clearNotice();
         if (!client) throw new Error('Torrent client is not ready.');
         const opts = {
+          store: makeStore,
           strategy: 'sequential',
           destroyStoreOnDestroy: false
         };
-
-        // WebTorrent 3 includes an FSA-backed browser store. Prefer it because
-        // it is suitable for multi-GB downloads; fall back to IndexedDB only
-        // when this browser cannot expose OPFS.
-        if (opfsRoot) {
-          opts.rootDir = opfsRoot;
-        } else {
-          opts.store = makeFallbackStore;
-        }
         // Saved torrents start paused until their existing pieces are verified.
         // This prevents a power-loss/reload recovery from racing a fresh download.
         if (existing) {
@@ -478,7 +585,9 @@ const DB_NAME = 'torrent-downloader';
             await writable.close();
             return;
           }
-          const blob = await file.blob();
+          const blob = typeof file.blob === 'function'
+            ? await file.blob()
+            : new Blob([await file.arrayBuffer()], { type: file.type || 'application/octet-stream' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
