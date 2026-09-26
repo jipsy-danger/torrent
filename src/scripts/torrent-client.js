@@ -461,14 +461,6 @@ const DB_NAME = 'torrent-downloader';
           showNotice(err?.message || String(err));
         });
         torrent.on('metadata', async () => {
-          // Add currently listed WebTorrent-compatible trackers before discovery.
-          // Never add public trackers to a private torrent.
-          if (!torrent.private) {
-            const current = Array.isArray(torrent.announce) ? torrent.announce : [];
-            const compatible = current.filter((url) => /^wss?:\/\//i.test(url));
-            torrent.announce = [...new Set([...compatible, ...WEBTORRENT_TRACKERS])];
-          }
-
           const newKey = torrent.infoHash || torrent.magnetURI;
           const item = live.get(key);
           if (key !== newKey && item) {
@@ -766,7 +758,11 @@ const DB_NAME = 'torrent-downloader';
           return;
         }
 
-        client = new WebTorrent();
+        client = new WebTorrent({
+          tracker: {
+            announce: WEBTORRENT_TRACKERS
+          }
+        });
         client.on('error', (error) => showNotice(error?.message || String(error)));
 
         const saved = db ? await dbAll() : [];
