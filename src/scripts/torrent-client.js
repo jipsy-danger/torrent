@@ -10,6 +10,15 @@ const DB_NAME = 'torrent-downloader';
       const live = new Map();
       const saveTimers = new Map();
 
+      // Browser WebTorrent can use WebSocket WebTorrent trackers.
+      // HTTP/UDP trackers found in ordinary torrent files are not usable
+      // directly by a browser client. These are only added to public torrents.
+      const WEBTORRENT_TRACKERS = [
+        'wss://tracker.btorrent.xyz',
+        'wss://tracker.fastcast.nz',
+        'wss://tracker.openwebtorrent.com'
+      ];
+
       const $ = (id) => document.getElementById(id);
       const magnetInput = $('magnet');
       const notice = $('notice');
@@ -247,6 +256,7 @@ const DB_NAME = 'torrent-downloader';
           length: torrent.length || 0,
           progress: torrent.progress || 0,
           downloaded: torrent.downloaded || 0,
+          private: Boolean(torrent.private),
           status: stateFor(torrent),
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -299,6 +309,7 @@ const DB_NAME = 'torrent-downloader';
           record: existing || {
             key,
             magnet: torrent.magnetURI,
+            private: Boolean(torrent.private),
             name: torrent.name || 'Resolving torrent…',
             progress: 0,
             downloaded: 0,
@@ -317,7 +328,12 @@ const DB_NAME = 'torrent-downloader';
           render();
         });
         torrent.on('warning', (err) => {
-          showNotice(err?.message || String(err));
+          const message = err?.message || String(err);
+          if (/Unsupported tracker protocol/i.test(message)) {
+            showNotice('This torrent contains a tracker protocol that browsers cannot use directly. WebTorrent-compatible WebSocket trackers are being tried when the torrent is public.');
+            return;
+          }
+          showNotice(message);
         });
         torrent.on('error', (err) => {
           const item = live.get(key);
@@ -326,6 +342,13 @@ const DB_NAME = 'torrent-downloader';
           showNotice(err?.message || String(err));
         });
         torrent.on('metadata', async () => {
+          // Add browser-compatible trackers before WebTorrent starts discovery.
+          // Never add public trackers to a private torrent.
+          if (!torrent.private) {
+            const current = Array.isArray(torrent.announce) ? torrent.announce : [];
+            torrent.announce = [...new Set([...current, ...WEBTORRENT_TRACKERS])];
+          }
+
           const newKey = torrent.infoHash || torrent.magnetURI;
           const item = live.get(key);
           if (key !== newKey && item) {
