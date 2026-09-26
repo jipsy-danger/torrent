@@ -1,4 +1,4 @@
-import WebTorrent from 'webtorrent';
+import WebTorrent from './vendor/webtorrent.min.js';
 
 const DB_NAME = 'torrent-downloader';
       const DB_VERSION = 2;
