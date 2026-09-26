@@ -109,9 +109,9 @@ const DB_NAME = 'torrent-downloader';
           return new Error('Storage is closed');
         }
 
-        async _chunkHandle(index) {
+        async _chunkHandle(index, create = false) {
           const dir = await this.storageDirPromise;
-          return dir.getFileHandle(String(index), { create: true });
+          return dir.getFileHandle(String(index), { create });
         }
 
         put(index, buf, cb = () => {}) {
@@ -130,7 +130,7 @@ const DB_NAME = 'torrent-downloader';
 
           (async () => {
             try {
-              const handle = await this._chunkHandle(index);
+              const handle = await this._chunkHandle(index, true);
               const writable = await handle.createWritable({ keepExistingData: false });
               await writable.write(buf);
               await writable.close();
@@ -150,7 +150,7 @@ const DB_NAME = 'torrent-downloader';
 
           (async () => {
             try {
-              const handle = await this._chunkHandle(index);
+              const handle = await this._chunkHandle(index, false);
               let file = await handle.getFile();
 
               const defaultLength = index === this.lastChunkIndex
@@ -320,6 +320,71 @@ const DB_NAME = 'torrent-downloader';
         return new IDBFallbackChunkStore(chunkLength, storeOpts);
       }
 
+      function decodeBencode(input) {
+        const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+        let offset = 0;
+
+        const text = (start, end) => new TextDecoder().decode(bytes.slice(start, end));
+
+        function parse() {
+          const token = bytes[offset];
+          if (token === 105) { // i
+            offset += 1;
+            const end = bytes.indexOf(101, offset); // e
+            if (end < 0) throw new Error('Invalid bencode integer');
+            const value = Number(text(offset, end));
+            offset = end + 1;
+            return value;
+          }
+
+          if (token === 108) { // l
+            offset += 1;
+            const listValue = [];
+            while (bytes[offset] !== 101) listValue.push(parse());
+            offset += 1;
+            return listValue;
+          }
+
+          if (token === 100) { // d
+            offset += 1;
+            const object = {};
+            while (bytes[offset] !== 101) {
+              const keyBytes = parse();
+              const key = keyBytes instanceof Uint8Array
+                ? new TextDecoder().decode(keyBytes)
+                : String(keyBytes);
+              object[key] = parse();
+            }
+            offset += 1;
+            return object;
+          }
+
+          if (token >= 48 && token <= 57) {
+            let colon = offset;
+            while (bytes[colon] !== 58) colon += 1;
+            const length = Number(text(offset, colon));
+            offset = colon + 1;
+            const value = bytes.slice(offset, offset + length);
+            offset += length;
+            return value;
+          }
+
+          throw new Error('Invalid bencode token at byte ' + offset);
+        }
+
+        return parse();
+      }
+
+      function getTorrentPieceCount(bytes) {
+        try {
+          const parsed = decodeBencode(bytes);
+          const pieces = parsed?.info?.pieces;
+          return pieces instanceof Uint8Array ? Math.floor(pieces.length / 20) : 0;
+        } catch {
+          return 0;
+        }
+      }
+
       function bitfieldToBytes(bitfield, pieceCount) {
         if (!bitfield || !bitfield.get || !pieceCount) return null;
         const bytes = new Uint8Array(Math.ceil(pieceCount / 8));
@@ -376,6 +441,7 @@ const DB_NAME = 'torrent-downloader';
           status: stateFor(torrent),
           createdAt: Date.now(),
           updatedAt: Date.now(),
+          pieceCount: torrent.pieces?.length || 0,
           bitfield: bitfieldToBytes(torrent.bitfield, torrent.pieces?.length) || [],
           files: (torrent.files || []).map((file) => ({ name: file.name, path: file.path, length: file.length }))
         };
@@ -418,7 +484,7 @@ const DB_NAME = 'torrent-downloader';
         return { magnet: null, label };
       }
 
-      function attachTorrent(torrent, existing = null) {
+      function attachTorrent(torrent, existing = null, recordExtra = {}) {
         const key = existing?.key || torrent.infoHash || torrent.magnetURI;
         live.set(key, {
           torrent,
@@ -430,7 +496,8 @@ const DB_NAME = 'torrent-downloader';
             progress: 0,
             downloaded: 0,
             updatedAt: Date.now(),
-            files: []
+            files: [],
+            ...recordExtra
           },
           filesOpen: false
         });
@@ -498,28 +565,22 @@ const DB_NAME = 'torrent-downloader';
         return key;
       }
 
-      async function addTorrent(input, existing = null) {
+      async function addTorrent(input, existing = null, initialBitfield = null, recordExtra = {}) {
         clearNotice();
         if (!client) throw new Error('Torrent client is not ready.');
 
-        // WebTorrent identifies torrent files and magnets by info hash. Check
-        // the active client before creating another Torrent instance so selecting
-        // the same .torrent again never creates a temporary duplicate that then
-        // destroys/overwrites the visible entry.
         if (!existing) {
           try {
             const active = await client.get(input);
             if (active) {
               const known = [...live.values()].find((item) => item.torrent === active);
-              if (!known) {
-                attachTorrent(active);
-              }
+              if (!known) attachTorrent(active);
               showNotice('Torrent already added — continuing the existing download.');
               render();
               return active;
             }
           } catch {
-            // Let client.add() produce the normal validation error for malformed input.
+            // Let client.add() handle malformed torrent input.
           }
         }
 
@@ -529,12 +590,15 @@ const DB_NAME = 'torrent-downloader';
           destroyStoreOnDestroy: false
         };
 
-        // Saved torrents start paused until their existing pieces are verified.
-        // This prevents a power-loss/reload recovery from racing a fresh download.
-        if (existing) {
-          opts.paused = true;
-          if (existing.bitfield?.length) opts.bitfield = new Uint8Array(existing.bitfield);
+        if (initialBitfield) {
+          opts.bitfield = initialBitfield;
+        } else if (existing?.bitfield?.length) {
+          opts.bitfield = new Uint8Array(existing.bitfield);
+        } else if (existing?.progress === 0 && existing?.pieceCount) {
+          opts.bitfield = new Uint8Array(Math.ceil(existing.pieceCount / 8));
         }
+
+        if (existing) opts.paused = true;
 
         let torrent;
         try {
@@ -544,7 +608,7 @@ const DB_NAME = 'torrent-downloader';
           return null;
         }
 
-        const key = attachTorrent(torrent, existing);
+        const key = attachTorrent(torrent, existing, recordExtra);
         saveTorrent(torrent).catch(() => {});
         torrent.on('infoHash', () => {
           if (existing?.key && existing.key !== key) render();
@@ -574,7 +638,21 @@ const DB_NAME = 'torrent-downloader';
         clearNotice();
         try {
           const bytes = new Uint8Array(await file.arrayBuffer());
-          await addTorrent(bytes);
+          const pieceCount = getTorrentPieceCount(bytes);
+          const initialBitfield = pieceCount
+            ? new Uint8Array(Math.ceil(pieceCount / 8))
+            : null;
+
+          await addTorrent(
+            bytes,
+            null,
+            initialBitfield,
+            {
+              sourceType: 'file',
+              pieceCount,
+              torrentFileBytes: Array.from(bytes)
+            }
+          );
         } catch (error) {
           showNotice(error.message || String(error));
         }
@@ -767,10 +845,20 @@ const DB_NAME = 'torrent-downloader';
 
         const saved = db ? await dbAll() : [];
         for (const record of saved) {
-          if (!record.magnet) continue;
           try {
-            await addTorrent(record.magnet, record);
-          } catch { }
+            if (record.sourceType === 'file' && record.torrentFileBytes?.length) {
+              const bytes = new Uint8Array(record.torrentFileBytes);
+              const pieceCount = record.pieceCount || getTorrentPieceCount(bytes);
+              const bitfield = record.bitfield?.length
+                ? new Uint8Array(record.bitfield)
+                : (pieceCount ? new Uint8Array(Math.ceil(pieceCount / 8)) : null);
+              await addTorrent(bytes, record, bitfield);
+            } else if (record.magnet) {
+              await addTorrent(record.magnet, record);
+            }
+          } catch (error) {
+            showNotice(error?.message || String(error));
+          }
         }
         render();
       }
