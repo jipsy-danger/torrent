@@ -126,6 +126,7 @@ const title = 'torrent';
         .stats { grid-template-columns:repeat(2, minmax(0,1fr)); }
       }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/webtorrent@3.0.21/webtorrent.min.js"></script>
   </head>
   <body>
     <main class="app">
@@ -150,7 +151,7 @@ const title = 'torrent';
             <span>＋ Open .torrent file</span>
             <input id="torrentFile" type="file" accept=".torrent,application/x-bittorrent" />
           </label>
-          <span>Downloads are kept in browser storage and restored after reload.</span>
+          <span>Downloads are kept in browser storage and restored after reload or restart.</span>
         </div>
         <div class="notice" id="notice"></div>
       </section>
@@ -165,22 +166,19 @@ const title = 'torrent';
       </section>
 
       <div class="footer">
-        Piece data is stored in Origin Private File System (OPFS) through a WebTorrent chunk store, while torrent metadata is stored in IndexedDB.
-        Persistent storage is requested so a normal page refresh or system restart does not clear the saved download state. Browser uninstall/reset or explicit site-data deletion will remove it.
+        Torrent metadata and downloaded pieces are stored in IndexedDB through a persistent WebTorrent chunk store.
+        The app requests browser persistent storage so normal refreshes and system restarts retain the saved download state and partial pieces. Explicit site-data deletion or browser uninstall/reset can remove it.
       </div>
     </main>
 
     <script>
-      import WebTorrent from 'webtorrent';
-      import fsAccessChunkStore from 'fs-access-chunk-store';
-
       const DB_NAME = 'torrent-downloader';
-      const DB_VERSION = 1;
+      const DB_VERSION = 2;
       const STORE = 'torrents';
+      const PIECE_STORE = 'pieces';
 
       let db;
       let client;
-      let opfsRoot;
       const live = new Map();
       const saveTimers = new Map();
 
@@ -200,7 +198,15 @@ const title = 'torrent';
       function openDb() {
         return new Promise((resolve, reject) => {
           const req = indexedDB.open(DB_NAME, DB_VERSION);
-          req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'key' });
+          req.onupgradeneeded = () => {
+            const database = req.result;
+            if (!database.objectStoreNames.contains(STORE)) {
+              database.createObjectStore(STORE, { keyPath: 'key' });
+            }
+            if (!database.objectStoreNames.contains(PIECE_STORE)) {
+              database.createObjectStore(PIECE_STORE, { keyPath: ['name', 'index'] });
+            }
+          };
           req.onsuccess = () => resolve(req.result);
           req.onerror = () => reject(req.error);
         });
@@ -233,17 +239,132 @@ const title = 'torrent';
         });
       }
 
-      function persistStorage() {
-        if (!navigator.storage?.persist) return Promise.resolve(false);
-        return navigator.storage.persist().catch(() => false);
+      async function persistStorage() {
+        try {
+          if (!navigator.storage?.persist) return false;
+          return await navigator.storage.persist();
+        } catch {
+          return false;
+        }
+      }
+
+      class IDBChunkStore {
+        constructor(chunkLength, opts = {}) {
+          this.chunkLength = Number(chunkLength);
+          if (!this.chunkLength) throw new Error('Invalid torrent chunk length.');
+
+          this.closed = false;
+          this.length = Number(opts.length) || Infinity;
+          if (this.length !== Infinity) {
+            this.lastChunkLength = this.length % this.chunkLength || this.chunkLength;
+            this.lastChunkIndex = Math.ceil(this.length / this.chunkLength) - 1;
+          }
+
+          // WebTorrent supplies the infoHash as storeOpts.name.
+          this.name = opts.name || opts.torrent?.infoHash || 'default';
+        }
+
+        _error(message) {
+          const error = new Error(message);
+          return error;
+        }
+
+        put(index, buf, cb = () => {}) {
+          if (this.closed) return queueMicrotask(() => cb(this._error('Storage is closed')));
+          const last = index === this.lastChunkIndex;
+          const expected = last ? this.lastChunkLength : this.chunkLength;
+
+          if (expected && buf.length !== expected) {
+            return queueMicrotask(() => cb(this._error(
+              (last ? 'Last chunk' : 'Chunk') + ' length must be ' + expected
+            )));
+          }
+
+          try {
+            const tx = db.transaction(PIECE_STORE, 'readwrite');
+            tx.objectStore(PIECE_STORE).put({
+              name: this.name,
+              index,
+              data: new Uint8Array(buf).buffer
+            });
+            tx.oncomplete = () => cb(null);
+            tx.onerror = () => cb(tx.error || this._error('IndexedDB write failed'));
+            tx.onabort = () => cb(tx.error || this._error('IndexedDB write aborted'));
+          } catch (error) {
+            queueMicrotask(() => cb(error));
+          }
+        }
+
+        get(index, opts, cb = () => {}) {
+          if (typeof opts === 'function') return this.get(index, null, opts);
+          if (this.closed) return queueMicrotask(() => cb(this._error('Storage is closed')));
+
+          opts = opts || {};
+          const offset = Number(opts.offset || 0);
+
+          try {
+            const tx = db.transaction(PIECE_STORE, 'readonly');
+            const req = tx.objectStore(PIECE_STORE).get([this.name, index]);
+            req.onsuccess = () => {
+              const record = req.result;
+              if (!record?.data) {
+                const error = this._error('Index ' + index + ' does not exist');
+                error.notFound = true;
+                cb(error);
+                return;
+              }
+
+              let view = new Uint8Array(record.data);
+              const length = opts.length == null ? view.byteLength - offset : Number(opts.length);
+              view = view.slice(offset, offset + length);
+              cb(null, Buffer.from(view));
+            };
+            req.onerror = () => cb(req.error || this._error('IndexedDB read failed'));
+          } catch (error) {
+            queueMicrotask(() => cb(error));
+          }
+        }
+
+        close(cb = () => {}) {
+          if (this.closed) return queueMicrotask(() => cb(this._error('Storage is closed')));
+          this.closed = true;
+          queueMicrotask(() => cb(null));
+        }
+
+        destroy(cb = () => {}) {
+          if (this.closed) return queueMicrotask(() => cb(this._error('Storage is closed')));
+          const finish = (error) => {
+            if (error) cb(error);
+            else {
+              this.closed = true;
+              cb(null);
+            }
+          };
+
+          try {
+            const tx = db.transaction(PIECE_STORE, 'readwrite');
+            const store = tx.objectStore(PIECE_STORE);
+            const range = IDBKeyRange.bound([this.name, 0], [this.name, Number.MAX_SAFE_INTEGER]);
+            const cursorReq = store.openCursor(range);
+            cursorReq.onsuccess = () => {
+              const cursor = cursorReq.result;
+              if (cursor) {
+                cursor.delete();
+                cursor.continue();
+              }
+            };
+            cursorReq.onerror = () => finish(cursorReq.error || this._error('IndexedDB cleanup failed'));
+            tx.oncomplete = () => finish(null);
+            tx.onerror = () => finish(tx.error || this._error('IndexedDB cleanup failed'));
+            tx.onabort = () => finish(tx.error || this._error('IndexedDB cleanup aborted'));
+          } catch (error) {
+            queueMicrotask(() => finish(error));
+          }
+        }
       }
 
       function makeStore(chunkLength, storeOpts = {}) {
-        if (!opfsRoot) throw new Error('OPFS is unavailable in this browser.');
-        return fsAccessChunkStore(chunkLength, {
-          rootDir: opfsRoot,
-          name: storeOpts.name || 'default'
-        });
+        return new IDBChunkStore(chunkLength, storeOpts);
       }
 
       function bitfieldToBytes(bitfield, pieceCount) {
@@ -301,6 +422,7 @@ const title = 'torrent';
           status: stateFor(torrent),
           createdAt: Date.now(),
           updatedAt: Date.now(),
+          bitfield: bitfieldToBytes(torrent.bitfield, torrent.pieces?.length) || [],
           files: (torrent.files || []).map((file) => ({ name: file.name, path: file.path, length: file.length }))
         };
       }
@@ -388,9 +510,6 @@ const title = 'torrent';
         torrent.on('ready', async () => {
           try {
             await saveTorrent(torrent);
-            if (existing?.progress > 0 && torrent.rescanFiles) {
-              await new Promise((resolve) => torrent.rescanFiles(() => resolve()));
-            }
             if (existing && existing.status !== 'Paused' && !torrent.done) {
               torrent.resume();
             }
@@ -416,7 +535,10 @@ const title = 'torrent';
         };
         // Saved torrents start paused until their existing OPFS pieces are re-scanned.
         // This prevents a power-loss/reload recovery from racing a fresh download.
-        if (existing) opts.paused = true;
+        if (existing) {
+          opts.paused = true;
+          if (existing.bitfield?.length) opts.bitfield = new Uint8Array(existing.bitfield);
+        }
 
         let torrent;
         try {
@@ -427,6 +549,7 @@ const title = 'torrent';
         }
 
         const key = attachTorrent(torrent, existing);
+        saveTorrent(torrent).catch(() => {});
         torrent.on('infoHash', () => {
           if (existing?.key && existing.key !== key) render();
         });
@@ -612,16 +735,24 @@ const title = 'torrent';
       async function boot() {
         try {
           db = await openDb();
-          opfsRoot = await navigator.storage.getDirectory();
           const persisted = await persistStorage();
           $('storageDot').classList.remove('warn');
-          $('storageText').textContent = persisted ? 'Persistent storage enabled' : 'Browser storage available';
+          $('storageText').textContent = persisted
+            ? 'Persistent browser storage enabled'
+            : 'Browser storage available · persistence not guaranteed';
         } catch (error) {
-          $('storageText').textContent = 'Persistent storage unavailable';
-          showNotice('This browser could not expose OPFS/IndexedDB storage, so resumable downloads cannot be guaranteed. ' + (error?.message || ''));
+          $('storageText').textContent = 'Browser storage unavailable';
+          showNotice('IndexedDB is unavailable, so resumable downloads cannot be guaranteed. ' + (error?.message || ''));
+          return;
         }
 
-        client = new WebTorrent();
+        if (typeof window.WebTorrent !== 'function') {
+          $('storageText').textContent = 'WebTorrent failed to load';
+          showNotice('The WebTorrent browser bundle could not be loaded. Check the network connection and reload.');
+          return;
+        }
+
+        client = new window.WebTorrent();
         client.on('error', (error) => showNotice(error?.message || String(error)));
 
         const saved = db ? await dbAll() : [];
