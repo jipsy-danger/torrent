@@ -131,11 +131,21 @@ const DB_NAME = 'torrent-downloader';
               const t = item.torrent;
               const n = networkStateFor(t);
               const wires = wireSummary(t);
+              const canConnect = n.connection !== 'blocked' && n.connection !== 'offline';
+              const path = n.hasWebRtcPeer
+                ? 'WebRTC peer'
+                : n.hasWebSeed
+                  ? 'HTTP(S) web seed'
+                  : (n.protocols.wss + n.protocols.ws) > 0
+                    ? 'WebSocket tracker → WebRTC'
+                    : 'No browser transport';
               return '<div class="debug-torrent">' +
                 '<div class="debug-torrent-title">' + escapeDebug(t.name || item.record.name || key) + '</div>' +
                 '<div class="debug-grid">' +
                   '<div><small>Stage</small><b>' + escapeDebug(item.debug?.stage || 'unknown') + '</b></div>' +
                   '<div><small>Network</small><b>' + escapeDebug(n.connection) + '</b></div>' +
+                  '<div><small>Can connect</small><b>' + (canConnect ? 'YES' : 'NO') + '</b></div>' +
+                  '<div><small>Path</small><b>' + escapeDebug(path) + '</b></div>' +
                   '<div><small>Ready</small><b>' + (t.ready ? 'YES' : 'NO') + '</b></div>' +
                   '<div><small>Peers</small><b>' + String(t.numPeers || 0) + '</b></div>' +
                   '<div><small>Progress</small><b>' + ((t.progress || 0) * 100).toFixed(2) + '%</b></div>' +
