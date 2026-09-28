@@ -253,8 +253,7 @@ const title = 'torrent';
       </section>
 
       <div class="footer">
-        Torrent metadata and downloaded pieces are stored in IndexedDB through a persistent WebTorrent chunk store.
-        The app requests browser persistent storage so normal refreshes and system restarts retain the saved download state and partial pieces. Explicit site-data deletion or browser uninstall/reset can remove it.
+        Torrent metadata is stored in IndexedDB. Torrent pieces use persistent OPFS when available, with an IndexedDB fallback. The universal network adapter reports the browser-supported transport path and does not claim raw TCP/UDP support where the browser cannot provide it.
       </div>
     </main>
 
@@ -282,16 +281,18 @@ const title = 'torrent';
       const debugRefresh = document.getElementById('debugRefresh');
 
       debugButton?.addEventListener('click', () => {
-        document.getElementById('debugPanel')?.classList.add('open');
+        document.dispatchEvent(new CustomEvent('torrent-debug-open'));
       });
       debugClose?.addEventListener('click', () => {
-        document.getElementById('debugPanel')?.classList.remove('open');
+        document.dispatchEvent(new CustomEvent('torrent-debug-close'));
       });
       debugRefresh?.addEventListener('click', () => {
         document.dispatchEvent(new CustomEvent('torrent-debug-refresh'));
       });
       document.getElementById('debugPanel')?.addEventListener('click', (event) => {
-        if (event.target.id === 'debugPanel') event.currentTarget.classList.remove('open');
+        if (event.target.id === 'debugPanel') {
+          document.dispatchEvent(new CustomEvent('torrent-debug-close'));
+        }
       });
 
       import '../scripts/torrent-client.js';
