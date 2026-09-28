@@ -43,6 +43,7 @@ const title = 'torrent';
         padding: 8px 2px 24px;
       }
       .brand { display:flex; gap:12px; align-items:center; }
+      .brand-actions { display:flex; align-items:center; gap:8px; }
       .logo {
         width: 34px; height:34px; border-radius: 9px; display:grid; place-items:center;
         border:1px solid #344254; background:#161c26; box-shadow: var(--shadow);
@@ -117,6 +118,90 @@ const title = 'torrent';
       .footer { margin-top:18px; color:#727b88; font-size:11px; line-height:1.6; }
       .footer code { color:#a6b2c2; }
       .hidden { display:none !important; }
+
+      .network-chip {
+        display:inline-flex; align-items:center; gap:6px; margin-top:8px;
+        padding:5px 8px; border-radius:999px; border:1px solid #2b3542;
+        background:#0c1118; color:#aeb8c6; font-size:10px; line-height:1;
+      }
+      .network-chip::before {
+        content:""; width:6px; height:6px; border-radius:50%; background:#737d89;
+      }
+      .network-chip[data-state="connected"] { color:#9ee3bb; border-color:#27523d; }
+      .network-chip[data-state="connected"]::before { background:#58d68d; box-shadow:0 0 9px rgba(88,214,141,.35); }
+      .network-chip[data-state="waiting"], .network-chip[data-state="possible"] { color:#e4cb8c; border-color:#55482e; }
+      .network-chip[data-state="waiting"]::before, .network-chip[data-state="possible"]::before { background:#eab85b; }
+      .network-chip[data-state="blocked"], .network-chip[data-state="offline"] { color:#ff9b9b; border-color:#5a3030; }
+      .network-chip[data-state="blocked"]::before, .network-chip[data-state="offline"]::before { background:#ff7272; }
+
+      .debug-overlay {
+        position:fixed; inset:0; z-index:9999; display:none;
+        background:rgba(3,6,10,.72); backdrop-filter:blur(6px);
+        padding:24px; overflow:auto;
+      }
+      .debug-overlay.open { display:flex; justify-content:center; align-items:flex-start; }
+      .debug-window {
+        width:min(1040px,100%); margin:18px auto 50px;
+        background:#0d1118; border:1px solid #34404f; border-radius:14px;
+        box-shadow:0 30px 100px rgba(0,0,0,.55); overflow:hidden;
+      }
+      .debug-head {
+        display:flex; justify-content:space-between; gap:12px; align-items:center;
+        padding:14px 16px; border-bottom:1px solid #26303b;
+        position:sticky; top:0; background:#0d1118; z-index:2;
+      }
+      .debug-title { font-size:14px; font-weight:650; }
+      .debug-sub { margin-top:3px; color:#7e8997; font-size:10px; }
+      .debug-head-actions { display:flex; gap:7px; }
+      .debug-head-actions button { padding:7px 10px; border-radius:8px; font-size:11px; }
+      .debug-body { padding:16px; display:grid; gap:14px; }
+      .debug-body section {
+        border:1px solid #232d38; border-radius:10px; background:#10151d; padding:12px;
+      }
+      .debug-body h3 { margin:0 0 10px; font-size:12px; font-weight:620; }
+      .debug-grid {
+        display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px;
+      }
+      .debug-grid > div {
+        border:1px solid #202a35; background:#0c1118; padding:8px 9px; border-radius:8px; min-width:0;
+      }
+      .debug-grid small { display:block; color:#6f7a88; font-size:9px; text-transform:uppercase; letter-spacing:.04em; }
+      .debug-grid b { display:block; margin-top:3px; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .debug-row {
+        display:grid; grid-template-columns:170px 140px minmax(0,1fr); gap:10px;
+        align-items:center; padding:8px 0; border-bottom:1px solid #1d2630;
+      }
+      .debug-row:last-child { border-bottom:0; }
+      .debug-name { font-size:11px; font-weight:560; }
+      .debug-state {
+        font-size:9px; text-transform:uppercase; letter-spacing:.04em;
+        padding:4px 7px; border-radius:999px; justify-self:start; border:1px solid #2d3744;
+      }
+      .state-connected { color:#9ee3bb; border-color:#27523d; }
+      .state-available { color:#a9cdf8; border-color:#2c4967; }
+      .state-unavailable, .state-native-only { color:#ff9b9b; border-color:#5a3030; }
+      .state-detected-not-used, .state-browser-limited { color:#e4cb8c; border-color:#55482e; }
+      .debug-detail { color:#8e99a7; font-size:10px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .debug-torrent { border-top:1px solid #202a35; padding-top:10px; margin-top:10px; }
+      .debug-torrent:first-child { border-top:0; padding-top:0; margin-top:0; }
+      .debug-torrent-title { font-size:11px; font-weight:580; margin-bottom:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .debug-note { margin-top:8px; color:#9aa5b3; font-size:10px; line-height:1.5; }
+      .debug-wires { margin-top:7px; color:#667381; font:10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-all; }
+      .debug-log-list { max-height:290px; overflow:auto; background:#080c11; border-radius:8px; }
+      .debug-log { display:grid; grid-template-columns:78px minmax(0,1fr); gap:8px; padding:6px 8px; border-bottom:1px solid #141b22; font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+      .debug-log time { color:#566270; }
+      .debug-log span { color:#a8b2bf; word-break:break-word; }
+      .debug-empty { color:#65707d; font-size:10px; padding:10px 2px; }
+      .debug-toggle {
+        border:1px solid #303b48; background:#151b24; color:#aeb8c6; border-radius:999px;
+        padding:7px 10px; font-size:10px;
+      }
+      .debug-toggle:hover { background:#1b222d; }
+      @media (max-width: 760px) {
+        .debug-overlay { padding:8px; }
+        .debug-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+        .debug-row { grid-template-columns:1fr; gap:5px; }
+      }
       @media (max-width: 760px) {
         .entry { flex-direction:column; }
         .upload { align-items:flex-start; flex-direction:column; }
@@ -137,7 +222,10 @@ const title = 'torrent';
             <div class="sub">Browser torrent downloader · Astro + WebTorrent</div>
           </div>
         </div>
-        <div class="status" id="storageStatus"><span class="dot warn" id="storageDot"></span><span id="storageText">Checking persistent storage…</span></div>
+        <div class="brand-actions">
+          <div class="status" id="storageStatus"><span class="dot warn" id="storageDot"></span><span id="storageText">Checking persistent storage…</span></div>
+          <button class="debug-toggle" id="debugButton" type="button">Debug · Ctrl+Shift+J</button>
+        </div>
       </header>
 
       <section class="hero">
@@ -170,8 +258,43 @@ const title = 'torrent';
       </div>
     </main>
 
-        <script>
-          import '../scripts/torrent-client.js';
-        </script>
+        <div class="debug-overlay" id="debugPanel" aria-hidden="true">
+      <div class="debug-window" role="dialog" aria-modal="true" aria-labelledby="debugTitle">
+        <div class="debug-head">
+          <div>
+            <div class="debug-title" id="debugTitle">Torrent internal status</div>
+            <div class="debug-sub">Universal network adapter · live diagnostics · Ctrl+Shift+J</div>
+          </div>
+          <div class="debug-head-actions">
+            <button class="ghost" id="debugRefresh" type="button">Refresh</button>
+            <button class="danger" id="debugClose" type="button">Close</button>
+          </div>
+        </div>
+        <div class="debug-body" id="debugBody">
+          <div class="debug-empty">Starting diagnostics…</div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const debugButton = document.getElementById('debugButton');
+      const debugClose = document.getElementById('debugClose');
+      const debugRefresh = document.getElementById('debugRefresh');
+
+      debugButton?.addEventListener('click', () => {
+        document.getElementById('debugPanel')?.classList.add('open');
+      });
+      debugClose?.addEventListener('click', () => {
+        document.getElementById('debugPanel')?.classList.remove('open');
+      });
+      debugRefresh?.addEventListener('click', () => {
+        document.dispatchEvent(new CustomEvent('torrent-debug-refresh'));
+      });
+      document.getElementById('debugPanel')?.addEventListener('click', (event) => {
+        if (event.target.id === 'debugPanel') event.currentTarget.classList.remove('open');
+      });
+
+      import '../scripts/torrent-client.js';
+    </script>
   </body>
 </html>
