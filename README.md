@@ -28,3 +28,27 @@ The client uses WebTorrent in the browser. Browser WebTorrent uses WebRTC, so a 
 - fs-access-chunk-store
 - IndexedDB
 - Origin Private File System (OPFS)
+
+
+## Universal network adapter
+
+The browser client uses one adapter layer to classify and use the transport methods that a browser can actually provide:
+
+- WebRTC peer transport via WebSocket WebTorrent trackers.
+- HTTP(S) web seeds when the torrent provides them.
+- Browser HTTPS/fetch for network resources.
+- Persistent OPFS/IndexedDB storage for torrent state and pieces.
+
+The same adapter also reports transports that require a native/server component instead of pretending they work in a browser:
+
+- Raw TCP BitTorrent peers.
+- Raw UDP/uTP peers.
+- Native DHT/other native socket discovery.
+
+This distinction is important because current WebTorrent documentation states that browser WebTorrent uses WebRTC and does not support UDP/TCP peers in the browser.
+
+## Internal diagnostics
+
+The page includes a live diagnostics panel. Use the **Debug** button in the header, or `Ctrl+Shift+J` where the browser allows page-level interception.
+
+The diagnostics show browser network state, adapter availability, per-torrent connectivity, active wire types, tracker/web-seed counts, download progress, and the internal event log.
