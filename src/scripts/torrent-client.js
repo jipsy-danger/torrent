@@ -46,6 +46,13 @@ const DB_NAME = 'torrent-downloader';
         if (debugOpen) renderDebug();
       }
 
+      function liveKeyForTorrent(torrent) {
+        for (const [key, item] of live) {
+          if (item.torrent === torrent) return key;
+        }
+        return torrent?.infoHash || torrent?.magnetURI || 'unknown';
+      }
+
       function torrentDebugItem(key) {
         return live.get(key)?.debug || null;
       }
@@ -181,6 +188,9 @@ const DB_NAME = 'torrent-downloader';
           toggleDebug();
         }
       });
+      document.addEventListener('torrent-debug-open', () => toggleDebug(true));
+      document.addEventListener('torrent-debug-close', () => toggleDebug(false));
+      document.addEventListener('torrent-debug-refresh', () => renderDebug());
 
       function openDb() {
         return new Promise((resolve, reject) => {
@@ -676,18 +686,18 @@ const DB_NAME = 'torrent-downloader';
         });
 
         torrent.on('download', () => {
-          setDebugStage(key, 'downloading', 'Piece data received');
+          setDebugStage(liveKeyForTorrent(torrent), 'downloading', 'Piece data received');
           queueSave(torrent);
           render();
         });
         torrent.on('done', async () => {
-          setDebugStage(key, 'completed', 'Torrent download completed');
+          setDebugStage(liveKeyForTorrent(torrent), 'completed', 'Torrent download completed');
           try { await saveTorrent(torrent, { progress: 1, downloaded: torrent.length, status: 'Completed' }); } catch {}
           render();
         });
         torrent.on('warning', (err) => {
           const message = err?.message || String(err);
-          setDebugStage(key, 'warning', message);
+          setDebugStage(liveKeyForTorrent(torrent), 'warning', message);
 
           // Optional tracker failures are normal for public tracker pools.
           // Do not replace the entire UI with transient tracker noise.
@@ -699,14 +709,14 @@ const DB_NAME = 'torrent-downloader';
         });
         torrent.on('error', (err) => {
           const message = err?.message || 'torrent error';
-          setDebugStage(key, 'error', message);
+          setDebugStage(liveKeyForTorrent(torrent), 'error', message);
           const item = live.get(key);
           if (item) item.record.status = 'Error: ' + message;
           render();
           showNotice(err?.message || String(err));
         });
         torrent.on('metadata', async () => {
-          setDebugStage(key, 'metadata', 'Torrent metadata parsed', {
+          setDebugStage(liveKeyForTorrent(torrent), 'metadata', 'Torrent metadata parsed', {
             infoHash: torrent.infoHash,
             trackers: torrent.announce?.length || 0,
             webSeeds: torrent.urlList?.length || 0
@@ -722,7 +732,7 @@ const DB_NAME = 'torrent-downloader';
           render();
         });
         torrent.on('ready', async () => {
-          setDebugStage(key, 'ready', 'Torrent store and metadata are ready');
+          setDebugStage(liveKeyForTorrent(torrent), 'ready', 'Torrent store and metadata are ready');
           try {
             await saveTorrent(torrent);
             if (existing && existing.status !== 'Paused' && !torrent.done) {
@@ -735,7 +745,7 @@ const DB_NAME = 'torrent-downloader';
           render();
         });
         torrent.on('noPeers', (announceType) => {
-          setDebugStage(key, 'waiting-peers', 'No peer found via ' + announceType);
+          setDebugStage(liveKeyForTorrent(torrent), 'waiting-peers', 'No peer found via ' + announceType);
           if (announceType === 'tracker') {
             const item = live.get(key);
             if (item && !torrent.done && !torrent.paused) {
@@ -745,19 +755,19 @@ const DB_NAME = 'torrent-downloader';
           }
         });
         torrent.on('wire', (wire) => {
-          setDebugStage(key, 'connected', 'Wire connected: ' + (wire?.type || 'unknown'), {
+          setDebugStage(liveKeyForTorrent(torrent), 'connected', 'Wire connected: ' + (wire?.type || 'unknown'), {
             wireType: wire?.type || 'unknown'
           });
         });
         torrent.on('verified', (index) => {
-          if (index % 100 === 0) setDebugStage(key, 'verifying', 'Verified piece ' + index);
+          if (index % 100 === 0) setDebugStage(liveKeyForTorrent(torrent), 'verifying', 'Verified piece ' + index);
         });
         torrent.on('pause', () => {
-          setDebugStage(key, 'paused', 'Torrent paused');
+          setDebugStage(liveKeyForTorrent(torrent), 'paused', 'Torrent paused');
           render();
         });
         torrent.on('resume', () => {
-          setDebugStage(key, 'resuming', 'Torrent resumed');
+          setDebugStage(liveKeyForTorrent(torrent), 'resuming', 'Torrent resumed');
           render();
         });
 
@@ -766,6 +776,8 @@ const DB_NAME = 'torrent-downloader';
 
       async function addTorrent(input, existing = null, initialBitfield = null, recordExtra = {}) {
         clearNotice();
+        debugState.phase = 'adding-torrent';
+        debugLog('Input accepted: ' + (input instanceof Uint8Array ? '.torrent file' : 'magnet / torrent id'));
         if (!client) throw new Error('Torrent client is not ready.');
 
         if (!existing) {
@@ -863,6 +875,7 @@ const DB_NAME = 'torrent-downloader';
         try {
           const bytes = new Uint8Array(await file.arrayBuffer());
           const pieceCount = getTorrentPieceCount(bytes);
+          debugLog('Local .torrent file parsed enough to determine piece count: ' + pieceCount);
           const initialBitfield = pieceCount
             ? new Uint8Array(Math.ceil(pieceCount / 8))
             : null;
@@ -1000,8 +1013,11 @@ const DB_NAME = 'torrent-downloader';
           card.innerHTML =
             '<div class="top">' +
               '<div><div class="name">' + escapeHtml(cleanName(torrent.name || item.record.name)) + '</div>' +
-              '<div class="meta">' + escapeHtml(state) + ' · Network: ' + escapeHtml(network.connection) +
-                (torrent.infoHash ? ' · ' + escapeHtml(torrent.infoHash.slice(0, 12)) : '') + '</div></div>' +
+              '<div class="meta">' + escapeHtml(state) +
+                (torrent.infoHash ? ' · ' + escapeHtml(torrent.infoHash.slice(0, 12)) : '') + '</div>' +
+                '<div class="network-chip" data-state="' + escapeHtml(network.connection) + '">' +
+                  'Network: ' + escapeHtml(network.connection) + ' · ' + escapeHtml(network.connectedPeers + ' peer(s)') +
+                '</div></div>' +
               '<div class="actions">' +
                 '<button class="ghost" data-files="' + encodeAttr(key) + '">' + (item.filesOpen ? 'Hide files' : 'Files') + '</button>' +
                 (canPause ? '<button class="secondary" data-pause="' + encodeAttr(key) + '">' + (torrent.paused ? 'Resume' : 'Pause') + '</button>' : '') +
@@ -1036,6 +1052,8 @@ const DB_NAME = 'torrent-downloader';
       }
 
       async function boot() {
+        debugState.phase = 'initializing';
+        debugLog('Application boot started');
         try {
           db = await openDb();
           if (navigator.storage?.getDirectory) {
