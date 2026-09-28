@@ -1,4 +1,11 @@
 import WebTorrent from './vendor/webtorrent.min.js';
+import {
+  WEBTORRENT_TRACKERS,
+  createClientOptions,
+  inspectBrowserNetwork,
+  inspectTorrentNetwork,
+  adapterMatrix
+} from './universal-network-adapter.js';
 
 const DB_NAME = 'torrent-downloader';
       const DB_VERSION = 2;
@@ -10,15 +17,15 @@ const DB_NAME = 'torrent-downloader';
       let opfsRoot = null;
       const live = new Map();
       const saveTimers = new Map();
-
-      // Browser WebTorrent can use WebSocket WebTorrent trackers.
-      // HTTP/UDP trackers found in ordinary torrent files are not usable
-      // directly by a browser client. These are only added to public torrents.
-      const WEBTORRENT_TRACKERS = [
-        'wss://tracker.webtorrent.dev:443',
-        'wss://tracker.openwebtorrent.com:443',
-        'wss://open.ftorrent.com:443'
-      ];
+      const browserNetwork = inspectBrowserNetwork();
+      const debugState = {
+        startedAt: Date.now(),
+        phase: 'booting',
+        events: [],
+        lastError: null,
+        browserNetwork
+      };
+      let debugOpen = false;
 
       const $ = (id) => document.getElementById(id);
       const magnetInput = $('magnet');
@@ -27,11 +34,153 @@ const DB_NAME = 'torrent-downloader';
       const empty = $('empty');
       const count = $('count');
 
+      function debugLog(message, meta = null, key = null) {
+        const event = {
+          time: new Date().toISOString(),
+          key,
+          message,
+          meta: meta || undefined
+        };
+        debugState.events.push(event);
+        if (debugState.events.length > 250) debugState.events.shift();
+        if (debugOpen) renderDebug();
+      }
+
+      function torrentDebugItem(key) {
+        return live.get(key)?.debug || null;
+      }
+
+      function setDebugStage(key, stage, message, meta = null) {
+        const item = torrentDebugItem(key);
+        if (item) {
+          item.stage = stage;
+          item.updatedAt = Date.now();
+          if (message) item.lastMessage = message;
+          if (meta) item.meta = { ...(item.meta || {}), ...meta };
+        }
+        debugLog(message || stage, meta, key);
+        if (debugOpen) renderDebug();
+      }
+
       function showNotice(message) {
+        debugState.lastError = message;
+        debugLog('NOTICE: ' + message);
         notice.textContent = message;
         notice.style.display = 'block';
       }
       function clearNotice() { notice.style.display = 'none'; }
+
+      function networkStateFor(torrent) {
+        return inspectTorrentNetwork(torrent, inspectBrowserNetwork());
+      }
+
+      function wireSummary(torrent) {
+        return (torrent?.wires || []).reduce((acc, wire) => {
+          const type = wire?.type || 'unknown';
+          acc[type] = (acc[type] || 0) + 1;
+          return acc;
+        }, {});
+      }
+
+      function escapeDebug(value) {
+        return escapeHtml(String(value ?? ''));
+      }
+
+      function renderDebug() {
+        const root = $('debugPanel');
+        const body = $('debugBody');
+        if (!root || !body) return;
+
+        const network = inspectBrowserNetwork();
+        debugState.browserNetwork = network;
+        const torrents = [...live.entries()];
+
+        const adapterRows = torrents.length
+          ? adapterMatrix(torrents[0][1].torrent, network)
+          : adapterMatrix({ announce: WEBTORRENT_TRACKERS, urlList: [], wires: [] }, network);
+
+        const adapterHtml = adapterRows.map((row) =>
+          '<div class="debug-row">' +
+            '<span class="debug-name">' + escapeDebug(row.name) + '</span>' +
+            '<span class="debug-state state-' + escapeDebug(row.state) + '">' + escapeDebug(row.state) + '</span>' +
+            '<span class="debug-detail">' + escapeDebug(row.detail) + '</span>' +
+          '</div>'
+        ).join('');
+
+        const browserHtml =
+          '<div class="debug-grid">' +
+            '<div><small>Internet</small><b>' + (network.online ? 'ONLINE' : 'OFFLINE') + '</b></div>' +
+            '<div><small>WebRTC</small><b>' + (network.webrtc ? 'AVAILABLE' : 'UNAVAILABLE') + '</b></div>' +
+            '<div><small>WebSocket</small><b>' + (network.websocket ? 'AVAILABLE' : 'UNAVAILABLE') + '</b></div>' +
+            '<div><small>Fetch</small><b>' + (network.fetch ? 'AVAILABLE' : 'UNAVAILABLE') + '</b></div>' +
+            '<div><small>OPFS</small><b>' + (network.fileSystemAccess ? 'AVAILABLE' : 'UNAVAILABLE') + '</b></div>' +
+            '<div><small>WebTransport</small><b>' + (network.webTransport ? 'DETECTED' : 'UNAVAILABLE') + '</b></div>' +
+            '<div><small>Network</small><b>' + escapeDebug(network.networkType) + '</b></div>' +
+            '<div><small>RTT</small><b>' + (network.rttMs == null ? '—' : network.rttMs + ' ms') + '</b></div>' +
+          '</div>';
+
+        const torrentHtml = torrents.length
+          ? torrents.map(([key, item]) => {
+              const t = item.torrent;
+              const n = networkStateFor(t);
+              const wires = wireSummary(t);
+              return '<div class="debug-torrent">' +
+                '<div class="debug-torrent-title">' + escapeDebug(t.name || item.record.name || key) + '</div>' +
+                '<div class="debug-grid">' +
+                  '<div><small>Stage</small><b>' + escapeDebug(item.debug?.stage || 'unknown') + '</b></div>' +
+                  '<div><small>Network</small><b>' + escapeDebug(n.connection) + '</b></div>' +
+                  '<div><small>Ready</small><b>' + (t.ready ? 'YES' : 'NO') + '</b></div>' +
+                  '<div><small>Peers</small><b>' + String(t.numPeers || 0) + '</b></div>' +
+                  '<div><small>Progress</small><b>' + ((t.progress || 0) * 100).toFixed(2) + '%</b></div>' +
+                  '<div><small>Speed</small><b>' + escapeDebug(formatRate(t.downloadSpeed || 0)) + '</b></div>' +
+                  '<div><small>Trackers</small><b>' + n.announce.length + '</b></div>' +
+                  '<div><small>Web seeds</small><b>' + n.webSeedUrls.length + '</b></div>' +
+                '</div>' +
+                '<div class="debug-note">' + escapeDebug(n.reason) + '</div>' +
+                '<div class="debug-wires">' + escapeDebug(JSON.stringify(wires)) + '</div>' +
+              '</div>';
+            }).join('')
+          : '<div class="debug-empty">No torrents loaded.</div>';
+
+        const recent = debugState.events.slice(-80).reverse().map((event) =>
+          '<div class="debug-log">' +
+            '<time>' + escapeDebug(event.time.slice(11, 23)) + '</time>' +
+            '<span>' + escapeDebug(event.key ? '[' + event.key.slice(0, 10) + '] ' : '') + escapeDebug(event.message) + '</span>' +
+          '</div>'
+        ).join('');
+
+        body.innerHTML =
+          '<section><h3>Browser network</h3>' + browserHtml + '</section>' +
+          '<section><h3>Universal adapters</h3>' + adapterHtml + '</section>' +
+          '<section><h3>Torrent status</h3>' + torrentHtml + '</section>' +
+          '<section><h3>Internal event log</h3><div class="debug-log-list">' + (recent || '<div class="debug-empty">No events.</div>') + '</div></section>';
+      }
+
+      function toggleDebug(force) {
+        const root = $('debugPanel');
+        if (!root) return;
+        debugOpen = typeof force === 'boolean' ? force : !debugOpen;
+        root.classList.toggle('open', debugOpen);
+        root.setAttribute('aria-hidden', String(!debugOpen));
+        if (debugOpen) renderDebug();
+      }
+
+      window.addEventListener('online', () => {
+        browserNetwork.online = true;
+        debugLog('Browser network: ONLINE');
+        renderDebug();
+      });
+      window.addEventListener('offline', () => {
+        browserNetwork.online = false;
+        debugLog('Browser network: OFFLINE');
+        renderDebug();
+      });
+      window.addEventListener('keydown', (event) => {
+        if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'j') {
+          event.preventDefault();
+          toggleDebug();
+        }
+      });
 
       function openDb() {
         return new Promise((resolve, reject) => {
@@ -375,6 +524,23 @@ const DB_NAME = 'torrent-downloader';
         return parse();
       }
 
+      function getTorrentWebSeeds(bytes) {
+        try {
+          const parsed = decodeBencode(bytes);
+          const values = [];
+          const append = (value) => {
+            if (value instanceof Uint8Array) values.push(new TextDecoder().decode(value));
+            else if (typeof value === 'string') values.push(value);
+            else if (Array.isArray(value)) value.forEach(append);
+          };
+          append(parsed?.['url-list']);
+          append(parsed?.httpseeds);
+          return [...new Set(values.filter((value) => /^https?:\\/\\//i.test(value)))];
+        } catch {
+          return [];
+        }
+      }
+
       function getTorrentPieceCount(bytes) {
         try {
           const parsed = decodeBencode(bytes);
@@ -423,8 +589,8 @@ const DB_NAME = 'torrent-downloader';
       function stateFor(torrent) {
         if (torrent.done) return 'Completed';
         if (torrent.paused) return 'Paused';
-        if (!torrent.ready) return 'Resolving…';
-        if (torrent.numPeers === 0) return 'Waiting for peers';
+        if (!torrent.ready) return 'Preparing';
+        if (torrent.numPeers === 0) return 'Waiting for network';
         return 'Downloading';
       }
 
@@ -488,6 +654,13 @@ const DB_NAME = 'torrent-downloader';
         const key = existing?.key || torrent.infoHash || torrent.magnetURI;
         live.set(key, {
           torrent,
+          debug: {
+            stage: existing ? 'restoring' : 'starting',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            lastMessage: existing ? 'Restoring saved torrent' : 'Torrent instance created',
+            meta: {}
+          },
           record: existing || {
             key,
             magnet: torrent.magnetURI,
@@ -503,15 +676,18 @@ const DB_NAME = 'torrent-downloader';
         });
 
         torrent.on('download', () => {
+          setDebugStage(key, 'downloading', 'Piece data received');
           queueSave(torrent);
           render();
         });
         torrent.on('done', async () => {
+          setDebugStage(key, 'completed', 'Torrent download completed');
           try { await saveTorrent(torrent, { progress: 1, downloaded: torrent.length, status: 'Completed' }); } catch {}
           render();
         });
         torrent.on('warning', (err) => {
           const message = err?.message || String(err);
+          setDebugStage(key, 'warning', message);
 
           // Optional tracker failures are normal for public tracker pools.
           // Do not replace the entire UI with transient tracker noise.
@@ -522,12 +698,19 @@ const DB_NAME = 'torrent-downloader';
           showNotice(message);
         });
         torrent.on('error', (err) => {
+          const message = err?.message || 'torrent error';
+          setDebugStage(key, 'error', message);
           const item = live.get(key);
-          if (item) item.record.status = 'Error: ' + (err?.message || 'torrent error');
+          if (item) item.record.status = 'Error: ' + message;
           render();
           showNotice(err?.message || String(err));
         });
         torrent.on('metadata', async () => {
+          setDebugStage(key, 'metadata', 'Torrent metadata parsed', {
+            infoHash: torrent.infoHash,
+            trackers: torrent.announce?.length || 0,
+            webSeeds: torrent.urlList?.length || 0
+          });
           const newKey = torrent.infoHash || torrent.magnetURI;
           const item = live.get(key);
           if (key !== newKey && item) {
@@ -539,6 +722,7 @@ const DB_NAME = 'torrent-downloader';
           render();
         });
         torrent.on('ready', async () => {
+          setDebugStage(key, 'ready', 'Torrent store and metadata are ready');
           try {
             await saveTorrent(torrent);
             if (existing && existing.status !== 'Paused' && !torrent.done) {
@@ -551,6 +735,7 @@ const DB_NAME = 'torrent-downloader';
           render();
         });
         torrent.on('noPeers', (announceType) => {
+          setDebugStage(key, 'waiting-peers', 'No peer found via ' + announceType);
           if (announceType === 'tracker') {
             const item = live.get(key);
             if (item && !torrent.done && !torrent.paused) {
@@ -559,8 +744,22 @@ const DB_NAME = 'torrent-downloader';
             }
           }
         });
-        torrent.on('pause', render);
-        torrent.on('resume', render);
+        torrent.on('wire', (wire) => {
+          setDebugStage(key, 'connected', 'Wire connected: ' + (wire?.type || 'unknown'), {
+            wireType: wire?.type || 'unknown'
+          });
+        });
+        torrent.on('verified', (index) => {
+          if (index % 100 === 0) setDebugStage(key, 'verifying', 'Verified piece ' + index);
+        });
+        torrent.on('pause', () => {
+          setDebugStage(key, 'paused', 'Torrent paused');
+          render();
+        });
+        torrent.on('resume', () => {
+          setDebugStage(key, 'resuming', 'Torrent resumed');
+          render();
+        });
 
         return key;
       }
@@ -589,6 +788,11 @@ const DB_NAME = 'torrent-downloader';
           strategy: 'sequential',
           destroyStoreOnDestroy: false
         };
+
+        if (input instanceof Uint8Array) {
+          const webSeeds = getTorrentWebSeeds(input);
+          if (webSeeds.length) opts.urlList = webSeeds;
+        }
 
         if (initialBitfield) {
           opts.bitfield = initialBitfield;
@@ -780,6 +984,7 @@ const DB_NAME = 'torrent-downloader';
           const key = torrent.infoHash || torrent.magnetURI || item.record.key;
           const pct = Math.max(0, Math.min(100, (torrent.progress || item.record.progress || 0) * 100));
           const state = stateFor(torrent);
+          const network = networkStateFor(torrent);
           const canPause = !torrent.done;
           const fileKey = keyId(key);
           (torrent.files || []).forEach((file, index) => exportLookup.set(fileKey + '-' + index, file));
@@ -795,7 +1000,8 @@ const DB_NAME = 'torrent-downloader';
           card.innerHTML =
             '<div class="top">' +
               '<div><div class="name">' + escapeHtml(cleanName(torrent.name || item.record.name)) + '</div>' +
-              '<div class="meta">' + escapeHtml(state) + (torrent.infoHash ? ' · ' + escapeHtml(torrent.infoHash.slice(0, 12)) : '') + '</div></div>' +
+              '<div class="meta">' + escapeHtml(state) + ' · Network: ' + escapeHtml(network.connection) +
+                (torrent.infoHash ? ' · ' + escapeHtml(torrent.infoHash.slice(0, 12)) : '') + '</div></div>' +
               '<div class="actions">' +
                 '<button class="ghost" data-files="' + encodeAttr(key) + '">' + (item.filesOpen ? 'Hide files' : 'Files') + '</button>' +
                 (canPause ? '<button class="secondary" data-pause="' + encodeAttr(key) + '">' + (torrent.paused ? 'Resume' : 'Pause') + '</button>' : '') +
@@ -856,12 +1062,17 @@ const DB_NAME = 'torrent-downloader';
           return;
         }
 
-        client = new WebTorrent({
-          tracker: {
-            announce: WEBTORRENT_TRACKERS
-          }
+        client = new WebTorrent(createClientOptions());
+        debugState.phase = 'client-ready';
+        debugLog('WebTorrent client initialized', {
+          webRTC: WebTorrent.WEBRTC_SUPPORT,
+          trackers: WEBTORRENT_TRACKERS.length
         });
-        client.on('error', (error) => showNotice(error?.message || String(error)));
+        client.on('error', (error) => {
+          debugState.lastError = error?.message || String(error);
+          debugLog('CLIENT ERROR: ' + debugState.lastError);
+          showNotice(error?.message || String(error));
+        });
 
         const saved = db ? await dbAll() : [];
         for (const record of saved) {
@@ -911,5 +1122,10 @@ const DB_NAME = 'torrent-downloader';
           }
         } catch {}
       });
+
+      setInterval(() => {
+        if (!debugOpen) return;
+        renderDebug();
+      }, 1000);
 
       boot();
